@@ -17,7 +17,9 @@ if __name__=="__main__":
             torch.nn.Linear(8, 4)
         ),
         4,
-        'cpu',
-        
+        'cuda',
+        epochs=30
     )
     model.fit(X, y, c)
+    c_ind = model.score(X, y)
+    print("C index", c_ind)

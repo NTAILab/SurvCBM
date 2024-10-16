@@ -1,7 +1,9 @@
+from copy import deepcopy
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 from typing import List, Tuple, Any, Optional
+from sksurv.metrics import concordance_index_censored
 from .beran import Beran
 from time import time
 from tqdm import tqdm
@@ -102,7 +104,8 @@ class SurvBN(torch.nn.Module):
         self.D_bg = D[sort_args]
         self.T_diff_int = self.T_bg[1:] - self.T_bg[:-1]
         
-    def fit(self, X: np.ndarray, y: np.recarray, c: np.ndarray) -> 'SurvBN':
+    def fit(self, X: np.ndarray, y: np.recarray, c: np.ndarray, 
+            val_set: Optional[Tuple[np.ndarray, np.recarray]]=None) -> 'SurvBN':
         sub_batch_len = 512
         
         t = y['time'].copy()
@@ -117,17 +120,24 @@ class SurvBN(torch.nn.Module):
         optimizer = self._get_optimizer()
         start_time = time()
         bg_size = int(self.train_bg_part * X.shape[0])
+        cur_patience = 0
+        best_val_loss = 0
         
         for e in range(1, self.epochs + 1):
+            cum_llh_loss = 0
+            cum_ce_loss = 0
+            cum_loss = 0
+            i = 0
+            
             data = dataset_generator(X, c, t, d, bg_size, self.batch_num)
             
             C_back = self.np2torch(data[0], dtype=torch.long)
             T_back = self.np2torch(data[1])
             D_back = self.np2torch(data[2], torch.int)
             X_target = self.np2torch(data[3], device='cpu')
-            C_target = self.np2torch(data[3], device='cpu', dtype=torch.long)
-            T_target = self.np2torch(data[4], device='cpu')
-            D_target = self.np2torch(data[5], torch.int, device='cpu')
+            C_target = self.np2torch(data[4], device='cpu', dtype=torch.long)
+            T_target = self.np2torch(data[5], device='cpu')
+            D_target = self.np2torch(data[6], torch.int, device='cpu')
             dataset = TensorDataset(C_back, T_back, D_back, X_target, C_target, T_target, D_target)
             data_loader = DataLoader(dataset, 1, shuffle=False)
 
@@ -146,13 +156,79 @@ class SurvBN(torch.nn.Module):
                 optimizer.zero_grad()
                 self._set_background(c_b, t_b, d_b)
                 
-                target_ds = TensorDataset(x_t, t_t, d_t)
+                target_ds = TensorDataset(x_t, c_t, t_t, d_t)
                 target_loader = DataLoader(target_ds, sub_batch_len, False)
                 likelihood = 0
+                cross_entropy = 0
                 
-                for x_t_b, t_t_b, d_t_b in target_loader:
-                    x_t_b, t_t_b, d_t_b = x_t_b.to(self.device), t_t_b.to(self.device), d_t_b.to(self.device)
-                    hmm = self(self.np2torch(X))
+                for x_t_b, c_t_b, t_t_b, d_t_b in target_loader:
+                    x_t_b, c_t_b, t_t_b, d_t_b = x_t_b.to(self.device), c_t_b.to(self.device), t_t_b.to(self.device), d_t_b.to(self.device)
+                    c_pred = self.concepts_model_(x_t_b)
+                    sf, pi = self.beran(self.C_bg, self.D_bg, c_pred)
+                    likelihood += self._calc_likelihood(sf, pi, t_t_b, d_t_b)
+                    ce, ce_list = self._calc_cross_entropy(c_pred, c_t_b)
+                    cross_entropy += ce
+                    
+                
+                tl_len = len(target_loader)
+                likelihood /= tl_len
+                cross_entropy /= tl_len
+                
+                loss = -likelihood + cross_entropy
+                loss.backward()
+                optimizer.step()
+                
+                cum_llh_loss += likelihood.item()
+                cum_ce_loss += np.asarray(ce_list)
+                cum_loss += loss.item()
+                i += 1
+                epoch_metrics = {
+                    'Loss': cum_loss / i,
+                    'Likelihood': cum_llh_loss / i,
+                    'Cross Entropy': (cum_ce_loss / i).tolist()
+                }
+                prog_bar.set_postfix(epoch_metrics)
+            
+            if val_set is not None:
+                cur_patience += 1
+                # self._set_background(X_full_tens, T_full_tens, D_full_tens)
+                val_loss = self.score(*val_set)
+                if val_loss >= best_val_loss:
+                    best_val_loss = val_loss
+                    weights = deepcopy(self.state_dict())
+                    cur_patience = 0
+                print(f'Val C-index: {round(val_loss, 5)}, patience: {cur_patience}')
+                if cur_patience >= self.patience:
+                    print('Early stopping!')
+                    self.load_state_dict(weights)
+                    break    
+                
+        time_elapsed = time() - start_time
+        print('Training time:', round(time_elapsed, 1), 's.')
+        self.eval()
+        return self
+                    
+                    
+    def _calc_cross_entropy(self, c_pred: List[torch.Tensor], labels: torch.Tensor) -> Tuple[torch.Tensor, List[float]]:
+        loss = 0
+        float_vals = []
+        for i, pred in enumerate(c_pred):
+            cur_loss = torch.nn.functional.cross_entropy(pred, labels[:, i])
+            float_vals.append(cur_loss.item())
+            loss += cur_loss
+        return loss, float_vals
+    
+    def _calc_likelihood(self, sf: torch.Tensor, pi: torch.Tensor,
+                         t: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
+        idx = torch.searchsorted(self.T_bg, t).clamp_max_(pi.shape[1] - 1)
+        cens_mask = d == 0
+        idx_cens = idx[cens_mask]
+        idx_uncens = idx[~cens_mask]
+        pi_vals = torch.take_along_dim(pi[~cens_mask], idx_uncens[:, None], dim=-1)
+        sf_vals = torch.take_along_dim(sf[cens_mask], idx_cens[:, None], dim=-1)
+        pi_vals[pi_vals < 1e-15] = 1
+        likelihood = torch.sum(torch.log(pi_vals)) + torch.sum(torch.log(sf_vals))
+        return likelihood
             
     def _calc_exp_time(self, surv_func: torch.Tensor) -> torch.Tensor:
         integral = self.T_bg[None, 0] + \
@@ -161,15 +237,21 @@ class SurvBN(torch.nn.Module):
         
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         c = self.concepts_model_(x)
-        sf = self.beran(self.C_bg, self.D_bg, c)
+        sf, _ = self.beran(self.C_bg, self.D_bg, c)
         E_T = self._calc_exp_time(sf)
         return E_T, c
         
     @torch.inference_mode()
     def predict(self, x: np.ndarray) -> Tuple[np.ndarray, List[np.ndarray]]:
-        E_T_t, c_t = self(x)
+        E_T_t, c_t = self(self.np2torch(x))
         E_T = E_T_t.cpu().to_numpy()
         c = []
         for cur_tens in c_t:
             c.append(cur_tens.cpu().numpy())
         return E_T, c
+    
+    @torch.inference_mode()
+    def score(self, x: np.ndarray, y: np.recarray) -> float:
+        E_T_t, _ = self(self.np2torch(x))
+        c_ind, *_ = concordance_index_censored(y['cens'], y['time'], -E_T_t.cpu().numpy())
+        return c_ind
