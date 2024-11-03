@@ -1,17 +1,75 @@
 import torch
-from typing import List
+from torch.nn.functional import cross_entropy
+from typing import List, Literal
 
-
-class SimpleGauss(torch.nn.Module):
-    def __init__(self, device: torch.device, norm_axis: int=-2):
+class NNKernel(torch.nn.Module):
+    INTERNAL_DIM = 4
+    
+    def __init__(self, device: torch.device) -> None:
         super().__init__()
+        self.device = device
+        self.c_nn_list = None
+        self.kernel_nn = None
+
+    def _lazy_init(self, c_proba, c_bg):
+        self.c_nn_list = []
+        for i in range(len(c_proba)):
+            nn = torch.nn.Sequential(
+                    torch.nn.Linear(c_proba[i].shape[-1], self.INTERNAL_DIM),
+                    torch.nn.Tanh(),
+                    torch.nn.Linear(self.INTERNAL_DIM, self.INTERNAL_DIM),
+                    torch.nn.Tanh(),
+                ).to(self.device)
+            self.register_module(f'c_p_{i}', nn)
+            self.c_nn_list.append(nn)
+        self.kernel_nn = torch.nn.Sequential(
+            torch.nn.Linear(self.INTERNAL_DIM, self.INTERNAL_DIM),
+            torch.nn.Tanh(),
+            torch.nn.Linear(self.INTERNAL_DIM, 1),
+            torch.nn.Softplus(),
+        ).to(self.device)
+
+    def forward(self, c_bg, c_proba):
+        if self.kernel_nn is None:
+            self._lazy_init(c_proba, c_bg)
+        result = []
+        c_bg_e = c_bg[None, ...].expand(c_proba[0].shape[0], -1, -1)
+        for i, c_tensor in enumerate(c_proba):
+            proba = torch.softmax(c_tensor, dim=-1)[:, None, ...].repeat(1, c_bg.shape[0], 1)
+            one_hot_t_0 = torch.zeros_like(proba)
+            one_hot_t_0.scatter_(-1, c_bg_e[:, :, i, None], torch.ones_like(proba))
+            x_1 = self.c_nn_list[i](one_hot_t_0)
+            x_2 = self.c_nn_list[i](proba)
+            result.append(
+                self.kernel_nn(torch.abs(x_1 - x_2))
+            )
+        weights = torch.sum(torch.stack(result, dim=-2), dim=-2)
+        sum = torch.sum(weights, dim=1, keepdim=True).broadcast_to(weights.shape).clone()
+        bad_idx = sum < 1e-13
+        sum[bad_idx] = 1
+        norm_weights = weights / sum
+        norm_weights[bad_idx] = 0
+        return norm_weights
+
+
+class GaussKernel(torch.nn.Module):
+    def __init__(self, device: torch.device, 
+                 metric: Literal['l2', 'cross_entropy'] = 'l2',
+                 norm_axis: int=-2):
+        super().__init__()
+        # self.bandwidth = torch.nn.parameter.Parameter(
+        #                     torch.tensor([1.0],
+        #                     dtype=torch.get_default_dtype(), device=device),
+        #                     requires_grad=True)
+        self.dim = norm_axis
+        self.metric = getattr(self, f'calc_{metric}_metric_')
         self.bandwidth = torch.nn.parameter.Parameter(
                             torch.tensor([1.0],
                             dtype=torch.get_default_dtype(), device=device),
                             requires_grad=True)
-        self.dim = norm_axis
+        # self.device = device
         
-    def calc_metric_(self, c_in: torch.Tensor,
+    def calc_l2_metric_(self, c_in: torch.Tensor,
                     c_p: List[torch.Tensor]) -> torch.Tensor:
         # l2 metric
         result = []
@@ -24,10 +82,20 @@ class SimpleGauss(torch.nn.Module):
                 torch.sum(proba ** 2, dim=-1)
             )
         return torch.sum(torch.stack(result, dim=-1), dim=-1, keepdim=True)
+
+    def calc_cross_entropy_metric_(self, c_in: torch.Tensor,
+                    c_p: List[torch.Tensor]) -> torch.Tensor:
+        result = []
+        C_in = c_in[None, ...].expand(c_p[0].shape[0], -1, -1)
+        for i, c in enumerate(c_p):
+            c_rp = c[:, None, :].expand(-1, c_in.shape[0], -1).reshape(-1, c.shape[-1])
+            ce = cross_entropy(c_rp, C_in[..., i].ravel(), reduction='none')
+            result.append(ce.reshape(c_p[0].shape[0], c_in.shape[0]))
+        return torch.sum(torch.stack(result, dim=-1), dim=-1, keepdim=True)
     
     def forward(self, c_in: List[torch.Tensor], 
                 c_p: torch.Tensor) -> torch.Tensor:
-        metric = self.calc_metric_(c_in, c_p)
+        metric = self.metric(c_in, c_p)
         bandwidth = torch.clamp(self.bandwidth, min=0.1, max=10)
         weights = torch.exp(-metric / bandwidth)
         sum = torch.sum(weights, dim=self.dim, keepdim=True).broadcast_to(weights.shape).clone()
@@ -38,10 +106,14 @@ class SimpleGauss(torch.nn.Module):
         return norm_weights # (x_n_1, x_n_2, ..., 1)
         
 class Beran(torch.nn.Module):
-    def __init__(self, device: torch.device) -> None:
+    def __init__(self, device: torch.device, 
+                 metric: Literal['l2', 'cross_entropy', 'nn'] = 'l2') -> None:
         super().__init__()
         self.device = device
-        self.kernel = SimpleGauss(device)
+        if metric == 'nn':
+            self.kernel = NNKernel(device)
+        else:
+            self.kernel = GaussKernel(device, metric)
 
     def forward(self, c_in, delta_in, c_p):
         # n = c_in.shape[0]
