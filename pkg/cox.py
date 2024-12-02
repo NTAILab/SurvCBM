@@ -26,6 +26,15 @@ class Cox(torch.nn.Module):
         
     def _init_km(self, t: np.ndarray, d: np.ndarray):
         time, s = kaplan_meier_estimator(d.astype(bool), t)
+        if time.shape[0] != t.shape[0]:
+            # t is sorted
+            t_mask = (t[1:] - t[:-1]) < 1e-8
+            t_idx = np.zeros_like(t, dtype=int)
+            t_idx[1:] = ~t_mask
+            idxes = np.cumsum(t_idx, dtype=int)
+            S = np.empty_like(t)
+            S = s[idxes]
+            s = S
         s[s < 1e-13] = 1e-13
         self.S_km = torch.log(torch.tensor(s, 
                         dtype=torch.get_default_dtype(),
