@@ -40,13 +40,10 @@ class Cox(torch.nn.Module):
                         dtype=torch.get_default_dtype(),
                         device=self.device))
         
-    def forward(self, c: List[torch.Tensor]) -> torch.Tensor:
-        assert self.S_km is not None, "Use _init_km first"
-        c_all = torch.cat(c, axis=-1)
-        if self.cox_model is None:
-            self._lazy_init(c_all)
-        cox = self.cox_model(c_all)
+    def _internal_fwd(self, x: torch.Tensor):
+        cox = self.cox_model(x)
         surv_func = torch.exp(self.S_km[None, :] * cox)
+        surv_func = surv_func.masked_scatter(surv_func < 1e-13, 1e-13 + torch.zeros_like(surv_func))
         surv_steps = surv_func[:, :-1] - surv_func[:, 1:]
         first_step = 1 - surv_func[:, 0]
         surv_steps = torch.concat((first_step[:, None], surv_steps), dim=-1)
@@ -56,3 +53,10 @@ class Cox(torch.nn.Module):
         surv_steps = surv_steps / sum
         surv_steps[bad_idx] = 0
         return surv_func, surv_steps
+        
+    def forward(self, c: List[torch.Tensor]) -> torch.Tensor:
+        assert self.S_km is not None, "Use _init_km first"
+        c_all = torch.cat(c, axis=-1)
+        if self.cox_model is None:
+            self._lazy_init(c_all)
+        return self._internal_fwd(c_all)

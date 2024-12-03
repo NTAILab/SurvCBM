@@ -57,7 +57,7 @@ class NNKernel(torch.nn.Module):
 
 class GaussKernel(torch.nn.Module):
     def __init__(self, device: torch.device, 
-                 metric: Literal['l2', 'cross_entropy'] = 'l2',
+                 metric: Literal['l2', 'cross_entropy', 'x_l2'] = 'l2',
                  norm_axis: int=-2):
         super().__init__()
         # self.bandwidth = torch.nn.parameter.Parameter(
@@ -88,6 +88,10 @@ class GaussKernel(torch.nn.Module):
         cat_proba = torch.cat(full_proba, dim=-1)
         cat_labels = torch.cat(full_labels, dim=-1)
         return torch.sum((cat_proba - cat_labels) ** 2, dim=-1, keepdim=True)
+    
+    def calc_x_l2_metric_(self, x_in: torch.Tensor,
+                    x_p: torch.Tensor):
+        return torch.sum((x_p[:, None, ...] - x_in[None, ...]) ** 2, dim=-1, keepdim=True)
 
     def calc_cross_entropy_metric_(self, c_in: torch.Tensor,
                     c_p: List[torch.Tensor]) -> torch.Tensor:
@@ -113,7 +117,7 @@ class GaussKernel(torch.nn.Module):
         
 class Beran(torch.nn.Module):
     def __init__(self, device: torch.device, 
-                 metric: Literal['l2', 'cross_entropy', 'nn'] = 'l2') -> None:
+                 metric: Literal['l2', 'cross_entropy', 'nn', 'x_l2'] = 'l2') -> None:
         super().__init__()
         self.device = device
         if metric == 'nn':
@@ -147,3 +151,5 @@ class Beran(torch.nn.Module):
         surv_steps = surv_steps / sum
         surv_steps[bad_idx] = 0
         return surv_func, surv_steps
+
+

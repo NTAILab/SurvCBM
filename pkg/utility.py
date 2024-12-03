@@ -76,3 +76,14 @@ class MlflowMultiLogger:
         if custom_dict is not None:
             mlflow.log_metrics(custom_dict, step_counter)
         self.calls += 1
+
+# without concepts
+class MlFlowRawLogger:
+    def __init__(self):
+        self.calls = 0
+        
+    def __call__(self, custom_dict: Optional[Dict] = None) -> None:
+        step_counter = self.calls + 1
+        if custom_dict is not None:
+            mlflow.log_metrics(custom_dict, step_counter)
+        self.calls += 1
