@@ -3,7 +3,7 @@ from torch.nn.functional import cross_entropy
 from typing import List, Literal
 
 class NNKernel(torch.nn.Module):
-    INTERNAL_DIM = 32
+    INTERNAL_DIM = 64
     
     def __init__(self, device: torch.device) -> None:
         super().__init__()
@@ -11,27 +11,34 @@ class NNKernel(torch.nn.Module):
         self.sparse_nn = None
         self.kernel_nn = None
 
-    def _lazy_init(self, c_proba, c_bg):
+    def _lazy_init(self, c_proba):
         full_in_dim = sum([c.shape[-1] for c in c_proba])
+        self.force_init(full_in_dim)
+
+    def force_init(self, inp_dim):
         self.sparse_nn = torch.nn.Sequential(
                 torch.nn.Linear(full_in_dim, self.INTERNAL_DIM),
-                torch.nn.Tanh(),
-                torch.nn.Linear(self.INTERNAL_DIM, self.INTERNAL_DIM),
-                torch.nn.Tanh(),
+                torch.nn.ReLU(),
+                # torch.nn.Linear(self.INTERNAL_DIM, self.INTERNAL_DIM),
+                # torch.nn.ReLU(),
             ).to(self.device)
         self.kernel_nn = torch.nn.Sequential(
-            torch.nn.Linear(self.INTERNAL_DIM, self.INTERNAL_DIM),
-            torch.nn.Tanh(),
-            torch.nn.Linear(self.INTERNAL_DIM, self.INTERNAL_DIM),
-            torch.nn.Tanh(),
-            torch.nn.Linear(self.INTERNAL_DIM, 1),
+            # torch.nn.Linear(self.INTERNAL_DIM, self.INTERNAL_DIM),
+            # torch.nn.Tanh(),
+            torch.nn.Linear(self.INTERNAL_DIM, self.INTERNAL_DIM // 2),
+            torch.nn.ReLU(),
+            torch.nn.Linear(self.INTERNAL_DIM // 2, 1),
             torch.nn.Softplus(),
         ).to(self.device)
+        # self.kernel_nn = torch.nn.Sequential(
+        #     torch.nn.Linear(full_in_dim, 1, bias=False),
+        #     torch.nn.Softplus(),
+        # ).to(self.device)
 
     def forward(self, c_bg, c_proba):
         if self.kernel_nn is None:
-            self._lazy_init(c_proba, c_bg)
-        result = []
+            self._lazy_init(c_proba)
+        # result = []
         c_bg_e = c_bg[None, ...].expand(c_proba[0].shape[0], -1, -1)
         full_proba = []
         full_labels = []
@@ -43,14 +50,21 @@ class NNKernel(torch.nn.Module):
             full_labels.append(one_hot_t_0)
         x_1 = self.sparse_nn(torch.cat(full_proba, dim=-1))
         x_2 = self.sparse_nn(torch.cat(full_labels, dim=-1))
-        result.append(
-            self.kernel_nn(torch.abs(x_1 - x_2))
-        )
-        weights = torch.sum(torch.stack(result, dim=-2), dim=-2)
-        sum = torch.sum(weights, dim=1, keepdim=True).broadcast_to(weights.shape).clone()
+        result = self.kernel_nn((x_1 - x_2) ** 2)
+        # result.append(
+        #     self.kernel_nn(torch.abs(x_1 - x_2))
+        # )
+        # result.append()
+        # result = self.kernel_nn((torch.cat(full_proba, dim=-1) - torch.cat(full_labels, dim=-1)) ** 2)
+        # print('dim res:', result.shape)
+        # print('dim c_bg:', c_bg.shape)
+        # print('dim c_proba:', len(c_proba), c_proba[0].shape)
+        # raise RuntimeError()
+        # weights = torch.sum(torch.stack(result, dim=-2), dim=-2)
+        sum = torch.sum(result, dim=1, keepdim=True).broadcast_to(result.shape).clone()
         bad_idx = sum < 1e-13
         sum[bad_idx] = 1
-        norm_weights = weights / sum
+        norm_weights = result / sum
         norm_weights[bad_idx] = 0
         return norm_weights
 
@@ -66,14 +80,26 @@ class GaussKernel(torch.nn.Module):
         #                     requires_grad=True)
         self.dim = norm_axis
         self.metric = getattr(self, f'calc_{metric}_metric_')
+        # self.bandwidth = torch.nn.parameter.Parameter(
+        #                     torch.tensor([1.0],
+        #                     dtype=torch.get_default_dtype(), device=device),
+        #                     requires_grad=True)
+        self.bandwidth = None
+        self.device = device
+
+    def force_init(self, inp_dim):
         self.bandwidth = torch.nn.parameter.Parameter(
-                            torch.tensor([1.0],
-                            dtype=torch.get_default_dtype(), device=device),
-                            requires_grad=True)
-        # self.device = device
+                    torch.tensor([1.0] * inp_dim,
+                    dtype=torch.get_default_dtype(), device=self.device),
+                    requires_grad=True)
         
     def calc_l2_metric_(self, c_in: torch.Tensor,
                     c_p: List[torch.Tensor]) -> torch.Tensor:
+        if self.bandwidth is None:
+            self.bandwidth = torch.nn.parameter.Parameter(
+                            torch.tensor([1.0] * sum([c.shape[-1] for c in c_p]),
+                            dtype=torch.get_default_dtype(), device=self.device),
+                            requires_grad=True)
         # l2 metric
         c_in_e = c_in[None, ...].expand(c_p[0].shape[0], -1, -1)
         full_proba = []
@@ -87,7 +113,8 @@ class GaussKernel(torch.nn.Module):
             full_labels.append(one_hot_0)
         cat_proba = torch.cat(full_proba, dim=-1)
         cat_labels = torch.cat(full_labels, dim=-1)
-        return torch.sum((cat_proba - cat_labels) ** 2, dim=-1, keepdim=True)
+        bandwidth = torch.clamp(self.bandwidth, min=0.001, max=10)
+        return torch.sum((cat_proba - cat_labels) ** 2 / bandwidth, dim=-1, keepdim=True)
     
     def calc_x_l2_metric_(self, x_in: torch.Tensor,
                     x_p: torch.Tensor):
@@ -106,8 +133,8 @@ class GaussKernel(torch.nn.Module):
     def forward(self, c_in: List[torch.Tensor], 
                 c_p: torch.Tensor) -> torch.Tensor:
         metric = self.metric(c_in, c_p)
-        bandwidth = torch.clamp(self.bandwidth, min=0.1, max=10)
-        weights = torch.exp(-metric / bandwidth)
+        weights = torch.exp(-metric)
+        # weights = torch.exp(-metric / bandwidth)
         sum = torch.sum(weights, dim=self.dim, keepdim=True).broadcast_to(weights.shape).clone()
         bad_idx = sum < 1e-13
         sum[bad_idx] = 1
@@ -124,7 +151,10 @@ class Beran(torch.nn.Module):
             self.kernel = NNKernel(device)
         else:
             self.kernel = GaussKernel(device, metric)
-
+    
+    def force_init(self, inp_dim):
+        self.kernel.force_init(inp_dim)
+    
     def forward(self, c_in, delta_in, c_p):
         # n = c_in.shape[0]
         # x_p_repeat = c_p[:, None, :].expand(-1, n, -1)

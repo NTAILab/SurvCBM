@@ -1,9 +1,10 @@
 import numpy as np
-from sksurv.metrics import concordance_index_censored
 from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
 from typing import Dict, Optional, List
-from time import time
-import mlflow
+try:
+    import mlflow
+except ImportError:
+    print("can't import the mlflow library, mlflow logging is unavailable")
 
 CENS_LABEL_TYPE = [('cens', '?'), ('time', 'f8')]
 
