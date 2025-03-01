@@ -17,7 +17,7 @@ class NNKernel(torch.nn.Module):
 
     def force_init(self, inp_dim):
         self.sparse_nn = torch.nn.Sequential(
-                torch.nn.Linear(full_in_dim, self.INTERNAL_DIM),
+                torch.nn.Linear(inp_dim, self.INTERNAL_DIM),
                 torch.nn.ReLU(),
                 # torch.nn.Linear(self.INTERNAL_DIM, self.INTERNAL_DIM),
                 # torch.nn.ReLU(),
@@ -30,15 +30,10 @@ class NNKernel(torch.nn.Module):
             torch.nn.Linear(self.INTERNAL_DIM // 2, 1),
             torch.nn.Softplus(),
         ).to(self.device)
-        # self.kernel_nn = torch.nn.Sequential(
-        #     torch.nn.Linear(full_in_dim, 1, bias=False),
-        #     torch.nn.Softplus(),
-        # ).to(self.device)
 
     def forward(self, c_bg, c_proba):
         if self.kernel_nn is None:
             self._lazy_init(c_proba)
-        # result = []
         c_bg_e = c_bg[None, ...].expand(c_proba[0].shape[0], -1, -1)
         full_proba = []
         full_labels = []
@@ -51,16 +46,6 @@ class NNKernel(torch.nn.Module):
         x_1 = self.sparse_nn(torch.cat(full_proba, dim=-1))
         x_2 = self.sparse_nn(torch.cat(full_labels, dim=-1))
         result = self.kernel_nn((x_1 - x_2) ** 2)
-        # result.append(
-        #     self.kernel_nn(torch.abs(x_1 - x_2))
-        # )
-        # result.append()
-        # result = self.kernel_nn((torch.cat(full_proba, dim=-1) - torch.cat(full_labels, dim=-1)) ** 2)
-        # print('dim res:', result.shape)
-        # print('dim c_bg:', c_bg.shape)
-        # print('dim c_proba:', len(c_proba), c_proba[0].shape)
-        # raise RuntimeError()
-        # weights = torch.sum(torch.stack(result, dim=-2), dim=-2)
         sum = torch.sum(result, dim=1, keepdim=True).broadcast_to(result.shape).clone()
         bad_idx = sum < 1e-13
         sum[bad_idx] = 1
@@ -74,16 +59,8 @@ class GaussKernel(torch.nn.Module):
                  metric: Literal['l2', 'cross_entropy', 'x_l2'] = 'l2',
                  norm_axis: int=-2):
         super().__init__()
-        # self.bandwidth = torch.nn.parameter.Parameter(
-        #                     torch.tensor([1.0],
-        #                     dtype=torch.get_default_dtype(), device=device),
-        #                     requires_grad=True)
         self.dim = norm_axis
         self.metric = getattr(self, f'calc_{metric}_metric_')
-        # self.bandwidth = torch.nn.parameter.Parameter(
-        #                     torch.tensor([1.0],
-        #                     dtype=torch.get_default_dtype(), device=device),
-        #                     requires_grad=True)
         self.bandwidth = None
         self.device = device
 
@@ -156,8 +133,6 @@ class Beran(torch.nn.Module):
         self.kernel.force_init(inp_dim)
     
     def forward(self, c_in, delta_in, c_p):
-        # n = c_in.shape[0]
-        # x_p_repeat = c_p[:, None, :].expand(-1, n, -1)
         W = self.kernel(c_in, c_p)[..., 0] # (batch, n)
         w_cumsum = torch.cumsum(W, dim=1)
         shifted_w_cumsum = w_cumsum - W
@@ -181,5 +156,3 @@ class Beran(torch.nn.Module):
         surv_steps = surv_steps / sum
         surv_steps[bad_idx] = 0
         return surv_func, surv_steps
-
-

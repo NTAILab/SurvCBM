@@ -103,7 +103,7 @@ def get_proc_mnist_np() -> Tuple[np.ndarray, np.ndarray]:
     for x, y in ds:
         X_list.append(x)
         y_list.append(y)
-    X_np = np.concatenate(X_list, axis=0) # (60000, 1, 28, 28)
+    X_np = np.concatenate(X_list, axis=0) # (:, 1, 28, 28)
     X_np = X_np / 255.0
     # std = np.std(X_np, 0, keepdims=True)
     # std[std < 1e-15] = 1.0

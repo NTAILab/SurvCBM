@@ -2,7 +2,7 @@ from copy import deepcopy
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-from typing import List, Tuple, Any, Optional, Callable, Dict, Literal
+from typing import List, Tuple, Optional, Callable, Dict, Literal
 from sksurv.metrics import concordance_index_censored
 from .cox import BaselineCox
 from time import time
@@ -154,11 +154,9 @@ class SurvBasic(torch.nn.Module):
                 
                 optimizer.zero_grad()
                 self._set_background(x_b, t_b, d_b)
-                # z_t = self.nn_model(x_t.to(self.device))
                 
                 target_ds = TensorDataset(x_t.to(self.device), t_t, d_t)
                 target_loader = DataLoader(target_ds, sub_batch_len, False)
-                # surv_loss = 0
 
                 for x_t_b, t_t_b, d_t_b in target_loader:
                     z_t_b = self.nn_model(x_t_b)
@@ -179,16 +177,8 @@ class SurvBasic(torch.nn.Module):
                     
                 
                 tl_len = len(target_loader)
-                # surv_loss /= tl_len
-                
-                # loss = -surv_loss
-                # loss.backward()
-                # torch.nn.utils.clip_grad_norm_(self.parameters(), 1, 
-                #                                error_if_nonfinite=True)
                 optimizer.step()
-                
-                # cum_surv_loss += surv_loss.item()
-                # cum_loss += loss.item()
+
                 i += 1
                 epoch_metrics = {
                     'Loss': cum_loss / (i * tl_len),
@@ -205,7 +195,6 @@ class SurvBasic(torch.nn.Module):
                 log_metrics_kw['custom_dict'] = train_metrics
             if val_set is not None:
                 cur_patience += 1
-                # self._set_background(X_full_tens, T_full_tens, D_full_tens)
                 E_T_v = self.predict(x_val)
                 val_loss, *_ = concordance_index_censored(val_set[1]['cens'], val_set[1]['time'], -E_T_v)
                 log_metrics_kw['custom_dict']['c_index/valid'] = val_loss

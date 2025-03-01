@@ -5,7 +5,7 @@ from copy import deepcopy
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-from typing import List, Tuple, Any, Optional, Callable, Dict, Literal
+from typing import List, Tuple, Optional, Callable, Dict, Literal
 from sksurv.metrics import concordance_index_censored
 from .beran import Beran
 from .cox import BaselineCox
@@ -55,7 +55,6 @@ class ConceptEasyClf(torch.nn.Module):
             assert c_cards.ndim == 1
         self.nn_list_ = []
         for i, card in enumerate(c_cards):
-            # sub_model = torch.nn.Linear(core_out_dim, card).to(device)
             sub_model = torch.nn.Sequential(
                 torch.nn.Linear(core_out_dim, core_out_dim // 2).to(device),
                 torch.nn.LeakyReLU(),
@@ -73,7 +72,7 @@ class ConceptEasyClf(torch.nn.Module):
         return result
 
 
-class SurvMixConc(torch.nn.Module):
+class SurvRCM(torch.nn.Module):
     def __init__(self, nn_model: torch.nn.Module,
                  nn_model_out_dim: int,
                  device: torch.device, 
@@ -133,8 +132,6 @@ class SurvMixConc(torch.nn.Module):
         dataset = TensorDataset(X)
         data_loader = DataLoader(dataset, self.target_size, shuffle=False)
         z_list = []
-        # for cur_x, in data_loader:
-        #     z_list.append(self.nn_model(cur_x.to(self.device)))
         for cur_x, in data_loader:
             z_list.append(self.nn_model(cur_x.to(self.device)).detach())
         z = torch.cat(z_list, dim=0)
@@ -148,7 +145,7 @@ class SurvMixConc(torch.nn.Module):
     # val_set is (T, D, concept_labels)
     def fit(self, X: np.ndarray, y: np.recarray, c: np.ndarray, 
             val_set: Optional[Tuple[np.ndarray, np.recarray, np.ndarray]]=None,
-            metrics_logger: Optional[Callable]=None) -> 'SurvBN':
+            metrics_logger: Optional[Callable]=None) -> 'SurvRCM':
         sub_batch_len = 512
         t = y['time'].copy()
         d = y['cens'].copy()
@@ -203,19 +200,8 @@ class SurvMixConc(torch.nn.Module):
                 
                 target_ds = TensorDataset(x_t.to(self.device), c_t, t_t, d_t)
                 target_loader = DataLoader(target_ds, sub_batch_len, False)
-                # surv_loss = 0
-                # cross_entropy = 0
                 
                 for x_t_b, c_t_b, t_t_b, d_t_b in target_loader:
-                    # print('shape', x_t_b.shape)
-                    
-                    # h = nvmlDeviceGetHandleByIndex(self.device.index)
-                    # info = nvmlDeviceGetMemoryInfo(h)
-                    # print(f'total    : {info.total}')
-                    # print(f'free     : {info.free}')
-                    # print(f'used     : {info.used}')
-                    # surv_loss = 0
-                    # cross_entropy = 0
                     # optimizer.zero_grad()
                     z_t_b = self.nn_model(x_t_b)
                     c_pred = self.concepts_model_(z_t_b)
@@ -230,7 +216,6 @@ class SurvMixConc(torch.nn.Module):
                     else:
                         surv_loss = self._calc_c_index(sf, t_t_b, d_t_b)
                     ce, ce_list = self._calc_cross_entropy(c_pred, c_t_b)
-                    # cross_entropy += ce
                     
                     loss = -self.alpha * surv_loss + (1 - self.alpha) * ce
                     loss.backward()
@@ -242,19 +227,8 @@ class SurvMixConc(torch.nn.Module):
                     cum_loss += loss.item()
                 
                 tl_len = len(target_loader)
-                # surv_loss /= tl_len
-                # cross_entropy /= tl_len
-                
-                # loss = -self.alpha * surv_loss + (1 - self.alpha) * cross_entropy
-                # loss.backward()
                 optimizer.step()
                 
-                # cum_surv_loss += cum_sl_stats / tl_len
-                # cum_ce_loss += cum_ce_stats / tl_len
-                # cum_loss += cum_loss_stats / tl_len
-                # cum_surv_loss /= tl_len
-                # cum_ce_loss /= tl_len
-                # cum_loss /= tl_len
                 i += 1
                 epoch_metrics = {
                     'Loss': cum_loss / (i * tl_len),
