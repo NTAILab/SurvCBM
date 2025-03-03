@@ -1,0 +1,7 @@
+numpy >= 1.26.4
+numba >= 0.60.0
+torch >= 2.5.0
+torchvision >= 0.20.0
+scikit-learn >= 1.5.2
+scikit-survival >= 0.23.0
+tqdm >= 4.66.5
